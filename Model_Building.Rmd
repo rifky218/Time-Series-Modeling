@@ -1,0 +1,265 @@
+---
+title: "Model Building"
+author: "Rifky - Dexibit"
+date: "9/4/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load all the packages needed
+
+```{r}
+suppressWarnings(suppressMessages(library(readxl)))
+suppressWarnings(suppressMessages(library(dplyr)))
+suppressWarnings(suppressMessages(library(tidyr)))
+suppressWarnings(suppressMessages(library(darksky)))
+suppressWarnings(suppressMessages(library(xts)))
+suppressWarnings(suppressMessages(library(purrr)))
+suppressWarnings(suppressMessages(library(caret)))
+suppressWarnings(suppressMessages(library(rvest)))
+suppressWarnings(suppressMessages(library(ggplot2)))
+suppressWarnings(suppressMessages(library(forecast)))
+suppressWarnings(suppressMessages(library(tseries)))
+suppressWarnings(suppressMessages(library(lubridate)))
+suppressWarnings(suppressMessages(library(Hmisc)))
+suppressWarnings(suppressMessages(library(urca)))
+suppressWarnings(suppressMessages(library(car)))
+suppressWarnings(suppressMessages(library(normwhn.test)))
+suppressWarnings(suppressMessages(library(fpp)))
+```
+
+# Load the Data
+
+```{r, warning=FALSE}
+total_visitors = read_excel("Total_Visitors_v3.xlsx")
+cols = c(colnames(total_visitors[,5:14]))
+total_visitors[cols] = lapply(total_visitors[cols], factor)
+total_visitors$total_opening = as.numeric(total_visitors$total_opening)
+cols = c(colnames(total_visitors[,45:128]))
+total_visitors[cols] = lapply(total_visitors[cols], as.numeric)
+```
+
+# Stationarity Test
+
+```{r}
+# Dickey–Fuller (ADF) t-statistic test
+adf.test(total_visitors$Tram_Counts) # p-value = 0.01 < 0.05 There is no unit root, so the data is stationary
+
+```
+
+# Split the data into Training and Testing
+
+```{r}
+# Exclude closed day
+#total_visitors = total_visitors[total_visitors$venue_closed == 0 & total_visitors$Tram_Counts != 0,]
+
+# Re-order the factor level
+total_visitors$day = relevel(total_visitors$day, ref = '7')
+total_visitors$month = relevel(total_visitors$month, ref = '12')
+#total_visitors$season = relevel(total_visitors$season, ref = 'Winter')
+
+# Split the Data into Training and Testing
+#total_visitors = total_visitors %>% filter(Date>='2017-01-01' & Date<='2019-01-01')
+#total_visitors_training = total_visitors %>% filter(Date>='2015-01-08' & Date<='2019-01-02')
+total_visitors_training = total_visitors %>% filter(Date>='2017-01-01' & Date<='2019-01-01')
+total_visitors_testing = total_visitors %>% filter(Date>='2019-01-01' & Date<='2019-05-14')
+```
+
+# MAPE Function
+
+```{r}
+# Create MAPE Function
+mape = function(actual,pred){
+           mape = mean(ifelse(actual==0, 0, abs((actual - pred)/actual))*100)
+           return (mape)
+}
+
+mapeSummary <- function (data,
+                            lev = NULL,
+                            model = NULL) {
+  out <- mape(expm1(data$obs), expm1(data$pred))  
+  names(out) <- "MAPE"
+  out
+}
+```
+
+# Rolling (S)ARIMA Model
+
+```{r}
+set.seed(123456)
+total_visitors_validation = total_visitors_training %>% filter(Date>='2018-01-01' & Date<='2019-01-01')
+
+# Load Package for Rolling
+library(greybox)
+
+# ARIMA MODEL
+# Load the parameters
+arima_parameter = read_excel("arima_parameter.xlsx")
+
+# Create prediction matrix
+prediction = list()
+
+# Create error matrix
+error = list()
+
+for (i in 1:8) {
+  ourValue = c("pred","se")
+  
+  # Store the forecasted values
+  prediction[[i]] = as.data.frame(t(ro(total_visitors_training$Tram_Counts, h=1, origins=365, call=arima_parameter[i,1], value=ourValue, ci=TRUE, co=TRUE)$pred))$h1
+
+  # Store the error values
+  error[[i]] = total_visitors_validation$Tram_Counts - prediction[[i]]
+  
+}
+
+prediction_validation_arima = as.data.frame(do.call(cbind, prediction))
+error_validation_arima = as.data.frame(do.call(cbind, error))
+
+# Calculate MAPE of the Validation data
+for(i in names(prediction_validation_arima)){
+  print(i)
+  print(mape(total_visitors_validation$Tram_Counts, prediction_validation_arima[,i]))
+}
+
+# Best Model: ARIMA(4,0,1)
+# Forecast values for the testing data
+prediction_testing_arima = as.data.frame(t(ro(total_visitors$Tram_Counts, h=1, origins=133, call='predict(arima(x=data,order=c(4,0,1)),n.ahead=h)', value=ourValue, ci=TRUE, co=TRUE)$pred))
+rownames(prediction_testing_arima) = c()
+total_visitors_testing$prediction_arima = prediction_testing_arima$h1
+
+# Calculate MAPE of the Testing data
+mape(total_visitors_testing$Tram_Counts, total_visitors_testing$prediction_arima)
+
+# SARIMA MODEL
+# Load the parameters
+sarima_parameter = read_excel("sarima_parameter.xlsx")
+
+# Create prediction matrix
+prediction = list()
+
+# Create error matrix
+error = list()
+
+for (i in 1:9) {
+  ourValue = c("pred","se")
+  
+  # Store the forecasted values
+  prediction[[i]] = as.data.frame(t(ro(total_visitors_training$Tram_Counts, h=1, origins=365, call=sarima_parameter[i,1], value=ourValue, ci=TRUE, co=TRUE)$pred))$h1
+
+  # Store the error values
+  error[[i]] = total_visitors_validation$Tram_Counts - prediction[[i]]
+}
+
+prediction_validation_sarima = as.data.frame(do.call(cbind, prediction))
+error_validation_sarima = as.data.frame(do.call(cbind, error))
+
+# Calculate MAPE of the Validation data
+for(i in names(prediction_validation_sarima)){
+  print(i)
+  print(mape(total_visitors_validation$Tram_Counts, prediction_validation_sarima[,i]))
+}
+
+# Best Model: SARIMA(4,0,1),(1,0,1)7
+# Forecast values for the testing data
+prediction_sarima = as.data.frame(t(ro(total_visitors$Tram_Counts, h=1, origins=133, call='predict(arima(x=data,order=c(4,0,1), seasonal = list(order = c(1,0,1), period = 7)), n.ahead=h)', value=ourValue, ci=TRUE, co=TRUE)$pred))
+rownames(prediction_sarima) = c()
+total_visitors_testing$prediction_sarima = prediction_sarima$h1
+
+# Calculate MAPE of the Testing data
+mape(total_visitors_testing$Tram_Counts, total_visitors_testing$prediction_sarima)
+
+```
+
+# Rolling (S)ARIMAX Model
+
+```{r}
+# Create predictor variables
+xreg = cbind(total_visitors_training$space_center_visitation_pred ,total_visitors_training$public_holiday, total_visitors_training$school_holiday, total_visitors_training$venue_closed, total_visitors_training$total_opening, total_visitors_training$SUM_precipIntensity, total_visitors_training$AVG_temperature, total_visitors_training$space_center_houston_ww)
+
+# 'counti' is used to define in-sample size of xreg,
+# 'counto' - the size of the holdout sample of xreg
+
+# ARIMAX MODEL
+# Load the parameters
+arimax_parameter = read_excel("arimax_parameter.xlsx")
+
+# Create prediction matrix
+prediction = list()
+
+# Create error matrix
+error = list()
+
+for (i in 1:8) {
+  ourValue = c("pred","se")
+  
+  # Store the forecasted values
+  prediction[[i]] = as.data.frame(t(ro(total_visitors_training$Tram_Counts, h=1, origins=365, call=arimax_parameter[i,1], value=ourValue, ci=TRUE, co=TRUE)$pred))$h1
+
+  # Store the error values
+  error[[i]] = total_visitors_validation$Tram_Counts - prediction[[i]]
+}
+
+prediction_validation_arimax = as.data.frame(do.call(cbind, prediction))
+error_validation_arimax = as.data.frame(do.call(cbind, error))
+
+# Calculate MAPE of the Validation data
+for(i in names(prediction_validation_arima)){
+  print(i)
+  print(mape(total_visitors_validation$Tram_Counts, prediction_validation_arimax[,i]))
+}
+
+# Best Model: ARIMAX(4,0,1)
+# Forecast values for the testing data
+prediction_arimax = as.data.frame(t(ro(total_visitors$Tram_Counts, h=1, origins=133, call='predict(arima(x=data, order=c(4,0,1), xreg=xreg[counti]), n.ahead=h, newxreg=xreg[counto])', value=ourValue, ci=TRUE, co=TRUE)$pred))
+rownames(prediction_arimax) = c()
+total_visitors_testing$prediction_arimax = prediction_arimax$h1
+
+# Calculate MAPE of the Testing data
+mape(total_visitors_testing$Tram_Counts, total_visitors_testing$prediction_arimax)
+
+# SARIMAX MODEL
+
+# Load the parameters
+sarimax_parameter = read_excel("sarimax_parameter.xlsx")
+
+# Create prediction matrix
+prediction = list()
+
+# Create error matrix
+error = list()
+
+for (i in 1:9) {
+  ourValue = c("pred","se")
+  
+  # Store the forecasted values
+  prediction[[i]] = as.data.frame(t(ro(total_visitors_training$Tram_Counts, h=1, origins=365, call=sarimax_parameter[i,1], value=ourValue, ci=TRUE, co=TRUE)$pred))$h1
+
+  # Store the error values
+  error[[i]] = total_visitors_validation$Tram_Counts - prediction[[i]]
+}
+
+prediction_validation_sarimax = as.data.frame(do.call(cbind, prediction))
+error_validation_sarimax = as.data.frame(do.call(cbind, error))
+
+# Calculate MAPE of the Validation data
+for(i in names(prediction_validation_sarimax)){
+  print(i)
+  print(mape(total_visitors_validation$Tram_Counts, prediction_validation_sarimax[,i]))
+}
+
+# Best Model: SARIMAX(4,0,1),(1,0,1)7
+# Forecast values for the testing data
+prediction_sarimax = as.data.frame(t(ro(total_visitors$Tram_Counts, h=1, origins=133, call='predict(arima(x=data, order=c(4,0,1), seasonal = list(order = c(1,0,1), period = 7), xreg=xreg[counti]), n.ahead=h, newxreg=xreg[counto])', value=ourValue, ci=TRUE, co=TRUE)$pred))
+rownames(prediction_sarimax) = c()
+total_visitors_testing$prediction_sarimax = prediction_sarimax$h1
+
+# Calculate MAPE of the Testing data
+mape(total_visitors_testing$Tram_Counts, total_visitors_testing$prediction_sarimax)
+
+```
+
+
